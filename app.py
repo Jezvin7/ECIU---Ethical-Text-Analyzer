@@ -24,11 +24,34 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 # ---------------------------------------------------
 # REUSABLE RESULT DISPLAY FUNCTION
 # ---------------------------------------------------
-def display_full_analysis(result, original_text=None):
+def display_full_analysis(result, original_text=None, source_links=None):
+    if source_links is None:
+        source_links = []
+
+    # ---------------------------------------------------
+    # Original analyzed text
+    # ---------------------------------------------------
     if original_text:
         st.header("Analyzed Text")
         st.write(original_text)
 
+    # ---------------------------------------------------
+    # Extracted clickable source links from LLM page
+    # ---------------------------------------------------
+    if source_links:
+        st.header("Extracted Clickable Source Links")
+
+        st.write(
+            "These are the actual URLs captured from clickable source labels "
+            "inside the LLM response."
+        )
+
+        for link in source_links:
+            st.write(f"- {link}")
+
+    # ---------------------------------------------------
+    # Overall Trust Score
+    # ---------------------------------------------------
     st.header("Overall Trust Score")
     st.metric("Trust Score", f"{result['trust_score']} / 100")
 
@@ -60,13 +83,14 @@ def display_full_analysis(result, original_text=None):
             st.write(f"**Claim:** {item['claim']}")
             st.write(f"**Status:** {item['status']}")
             st.write(f"**Similarity:** {item['similarity']}")
+
             if item.get("evidence_type"):
                 st.write(f"**Evidence Route:** {item['evidence_type']}")
 
-            if item["source"]:
+            if item.get("source"):
                 st.write(f"**Source:** {item['source']}")
 
-            if item["summary"]:
+            if item.get("summary"):
                 st.info(item["summary"])
 
             st.divider()
@@ -101,10 +125,28 @@ def display_full_analysis(result, original_text=None):
 
     if citation["sources"]:
         for source in citation["sources"]:
-            st.write(
-                f"- {source['url']} → {source['quality']} "
-                f"({source['score']}/100)"
-            )
+            source_type = source.get("type", "unknown")
+
+            if source_type == "url":
+                st.write(
+                    f"- {source.get('url', 'Unknown URL')} → "
+                    f"{source.get('quality', 'unknown quality')} "
+                    f"({source.get('score', 0)}/100)"
+                )
+
+            elif source_type == "named_source":
+                st.write(
+                    f"- {source.get('url', 'Trusted named source')} → "
+                    f"{source.get('quality', 'unknown quality')} "
+                    f"({source.get('score', 0)}/100)"
+                )
+
+            else:
+                st.write(
+                    f"- {source.get('url', 'Detected source')} → "
+                    f"{source.get('quality', 'unknown quality')} "
+                    f"({source.get('score', 0)}/100)"
+                )
     else:
         st.warning("No citations or links were found.")
 
@@ -156,10 +198,15 @@ if analysis_id:
             stored_data = response.json()
 
             original_text = stored_data["text"]
+            source_links = stored_data.get("source_links", [])
             result = stored_data["result"]
 
             st.success("Loaded analysis from browser extension.")
-            display_full_analysis(result, original_text)
+            display_full_analysis(
+                result=result,
+                original_text=original_text,
+                source_links=source_links
+            )
 
         else:
             st.error(
@@ -173,8 +220,7 @@ if analysis_id:
             "Make sure browser_api.py is running."
         )
 
-    # This prevents the normal manual text input section
-    # from running when a browser-extension result is opened.
+    # Prevent normal manual text input section from appearing
     st.stop()
 
 
@@ -192,6 +238,13 @@ if st.button("Analyze with AI"):
         st.warning("Please enter text.")
     else:
         with st.spinner("Running AI analysis..."):
-            result = analyze_full_text(text)
+            result = analyze_full_text(
+                text=text,
+                source_links=[]
+            )
 
-        display_full_analysis(result, text)
+        display_full_analysis(
+            result=result,
+            original_text=text,
+            source_links=[]
+        )

@@ -6,7 +6,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        text: message.text
+        text: message.text,
+        source_links: Array.isArray(message.source_links)
+          ? message.source_links
+          : []
       })
     })
       .then(response => {
@@ -22,9 +25,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       })
       .catch(error => {
+        console.error("Ethical Analyser fetch error:", error);
         sendResponse({
           success: false,
-          error: "Could not connect to Ethical Analyser backend."
+          error: "Backend API failed."
         });
       });
 

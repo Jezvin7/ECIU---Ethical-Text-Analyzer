@@ -11,10 +11,6 @@ from sentence_transformers import SentenceTransformer, util
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
-# ---------------------------------------------------
-# Trusted domains that may appear directly in LLM output
-# ---------------------------------------------------
-
 TRUSTED_DOMAINS = [
     "who.int",
     "unicef.org",
@@ -31,10 +27,6 @@ TRUSTED_DOMAINS = [
     "edu"
 ]
 
-
-# ---------------------------------------------------
-# URL extraction
-# ---------------------------------------------------
 
 def extract_urls(text):
     pattern = (
@@ -60,33 +52,32 @@ def get_domain(url):
 
 
 def is_trusted_domain(domain):
-    for trusted_domain in TRUSTED_DOMAINS:
-        if (
-            domain == trusted_domain
-            or domain.endswith("." + trusted_domain)
-            or trusted_domain in domain
-        ):
-            return True
-
-    return False
+    return any(
+        domain == trusted
+        or domain.endswith("." + trusted)
+        or trusted in domain
+        for trusted in TRUSTED_DOMAINS
+    )
 
 
-def get_trusted_urls_from_text(text):
-    urls = extract_urls(text)
+def get_trusted_urls(full_text, source_links):
+    visible_urls = extract_urls(full_text)
+
+    all_urls = list(dict.fromkeys(
+        visible_urls + source_links
+    ))
+
     trusted_urls = []
 
-    for url in urls:
-        domain = get_domain(url)
+    for url in all_urls:
+        normalized = normalize_url(url)
+        domain = get_domain(normalized)
 
         if is_trusted_domain(domain):
-            trusted_urls.append(normalize_url(url))
+            trusted_urls.append(normalized)
 
-    return list(dict.fromkeys(trusted_urls))
+    return trusted_urls
 
-
-# ---------------------------------------------------
-# Fetch direct trusted URL content
-# ---------------------------------------------------
 
 @lru_cache(maxsize=100)
 def fetch_webpage_text(url):
@@ -129,26 +120,26 @@ def fetch_webpage_text(url):
         return ""
 
 
-def collect_direct_trusted_url_evidence(full_text):
-    trusted_urls = get_trusted_urls_from_text(full_text)
-    evidence_items = []
+def collect_direct_trusted_url_evidence(full_text, source_links):
+    trusted_urls = get_trusted_urls(
+        full_text,
+        source_links
+    )
+
+    evidence = []
 
     for url in trusted_urls[:3]:
         page_text = fetch_webpage_text(url)
 
         if page_text:
-            evidence_items.append({
+            evidence.append({
                 "source": url,
                 "text": page_text,
-                "evidence_type": "Direct cited trusted URL"
+                "evidence_type": "Direct trusted source link"
             })
 
-    return evidence_items
+    return evidence
 
-
-# ---------------------------------------------------
-# Wikipedia Search API fallback
-# ---------------------------------------------------
 
 def search_wikipedia(claim):
     search_url = "https://en.wikipedia.org/w/api.php"
@@ -174,10 +165,10 @@ def search_wikipedia(claim):
 
         if response.status_code == 200:
             data = response.json()
-            search_results = data.get("query", {}).get("search", [])
+            results = data.get("query", {}).get("search", [])
 
-            if search_results:
-                return search_results[0]["title"]
+            if results:
+                return results[0]["title"]
 
     except Exception:
         pass
@@ -193,13 +184,11 @@ def get_wikipedia_summary(title):
         }
 
     safe_title = quote(title.replace(" ", "_"))
-    summary_url = (
-        f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
-    )
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
 
     try:
         response = requests.get(
-            summary_url,
+            url,
             timeout=8,
             headers={
                 "User-Agent": "EthicalAnalyserPrototype/1.0"
@@ -227,26 +216,19 @@ def get_wikipedia_summary(title):
 
 def retrieve_wikipedia_evidence(claim):
     title = search_wikipedia(claim)
-    wiki_data = get_wikipedia_summary(title)
+    summary = get_wikipedia_summary(title)
 
-    if not wiki_data["text"]:
+    if not summary["text"]:
         return []
 
     return [{
-        "source": wiki_data["source"],
-        "text": wiki_data["text"],
+        "source": summary["source"],
+        "text": summary["text"],
         "evidence_type": "Wikipedia search fallback"
     }]
 
 
-# ---------------------------------------------------
-# Evidence chunking and semantic matching
-# ---------------------------------------------------
-
-def split_into_evidence_chunks(text, max_chars=450):
-    if not text:
-        return []
-
+def split_into_chunks(text, max_chars=450):
     sentences = re.split(r'(?<=[.!?])\s+', text)
 
     chunks = []
@@ -273,19 +255,17 @@ def split_into_evidence_chunks(text, max_chars=450):
 
 
 def best_semantic_match(claim, evidence_items):
-    all_chunks = []
+    chunks = []
 
     for item in evidence_items:
-        chunks = split_into_evidence_chunks(item["text"])
-
-        for chunk in chunks:
-            all_chunks.append({
+        for chunk in split_into_chunks(item["text"]):
+            chunks.append({
                 "source": item["source"],
                 "chunk": chunk,
                 "evidence_type": item["evidence_type"]
             })
 
-    if not all_chunks:
+    if not chunks:
         return None
 
     claim_embedding = embedding_model.encode(
@@ -293,7 +273,7 @@ def best_semantic_match(claim, evidence_items):
         convert_to_tensor=True
     )
 
-    chunk_texts = [item["chunk"] for item in all_chunks]
+    chunk_texts = [item["chunk"] for item in chunks]
 
     chunk_embeddings = embedding_model.encode(
         chunk_texts,
@@ -308,13 +288,13 @@ def best_semantic_match(claim, evidence_items):
     best_index = int(similarities.argmax())
     best_similarity = float(similarities[best_index])
 
-    best_chunk = all_chunks[best_index]
+    chosen = chunks[best_index]
 
     return {
-        "source": best_chunk["source"],
-        "summary": best_chunk["chunk"],
+        "source": chosen["source"],
+        "summary": chosen["chunk"],
         "similarity": round(best_similarity, 3),
-        "evidence_type": best_chunk["evidence_type"]
+        "evidence_type": chosen["evidence_type"]
     }
 
 
@@ -328,21 +308,21 @@ def similarity_to_status(similarity):
     return "Not clearly supported"
 
 
-# ---------------------------------------------------
-# Skip citation-only fragments
-# ---------------------------------------------------
-
 def should_skip_claim_for_verification(claim):
     lower = claim.lower().strip()
 
-    citation_prefixes = [
+    skip_patterns = [
         "source:",
         "available at:",
         "citation:",
-        "references:"
+        "references:",
+        "this is for informational purposes only",
+        "for medical advice or diagnosis, consult a professional",
+        "gemini said",
+        "claude said"
     ]
 
-    if any(lower.startswith(prefix) for prefix in citation_prefixes):
+    if any(pattern in lower for pattern in skip_patterns):
         return True
 
     if len(claim.split()) <= 3 and extract_urls(claim):
@@ -351,20 +331,18 @@ def should_skip_claim_for_verification(claim):
     return False
 
 
-# ---------------------------------------------------
-# Main single-claim verification
-# ---------------------------------------------------
-
-def verify_claim_semantically(claim, full_text):
-    # 1. Try evidence from direct trusted URLs included in the LLM answer
-    direct_url_evidence = collect_direct_trusted_url_evidence(full_text)
+def verify_claim_semantically(claim, full_text, source_links):
+    direct_evidence = collect_direct_trusted_url_evidence(
+        full_text,
+        source_links
+    )
 
     direct_match = best_semantic_match(
         claim,
-        direct_url_evidence
+        direct_evidence
     )
 
-    if direct_match and direct_match["similarity"] >= 0.45:
+    if direct_match:
         return {
             "claim": claim,
             "status": similarity_to_status(direct_match["similarity"]),
@@ -374,25 +352,19 @@ def verify_claim_semantically(claim, full_text):
             "evidence_type": direct_match["evidence_type"]
         }
 
-    # 2. Fall back to free Wikipedia search
-    wikipedia_evidence = retrieve_wikipedia_evidence(claim)
+    wiki_evidence = retrieve_wikipedia_evidence(claim)
+    wiki_match = best_semantic_match(claim, wiki_evidence)
 
-    wikipedia_match = best_semantic_match(
-        claim,
-        wikipedia_evidence
-    )
-
-    if wikipedia_match:
+    if wiki_match and wiki_match["similarity"] >= 0.30:
         return {
             "claim": claim,
-            "status": similarity_to_status(wikipedia_match["similarity"]),
-            "similarity": wikipedia_match["similarity"],
-            "source": wikipedia_match["source"],
-            "summary": wikipedia_match["summary"],
-            "evidence_type": wikipedia_match["evidence_type"]
+            "status": similarity_to_status(wiki_match["similarity"]),
+            "similarity": wiki_match["similarity"],
+            "source": wiki_match["source"],
+            "summary": wiki_match["summary"],
+            "evidence_type": wiki_match["evidence_type"]
         }
 
-    # 3. No evidence retrieved
     return {
         "claim": claim,
         "status": "No reference source found",
@@ -403,25 +375,30 @@ def verify_claim_semantically(claim, full_text):
     }
 
 
-# ---------------------------------------------------
-# Verify all factual claims
-# ---------------------------------------------------
+def verify_factual_claims(classified_claims, full_text, source_links=None):
+    if source_links is None:
+        source_links = []
 
-def verify_factual_claims(classified_claims, full_text):
     factual_claims = [
         item["sentence"]
         for item in classified_claims
         if item["label"] == "factual claim"
     ]
 
-    verified_results = []
+    filtered_claims = [
+        claim for claim in factual_claims
+        if not should_skip_claim_for_verification(claim)
+    ]
 
-    for claim in factual_claims[:5]:
-        if should_skip_claim_for_verification(claim):
-            continue
+    results = []
 
-        verified_results.append(
-            verify_claim_semantically(claim, full_text)
+    for claim in filtered_claims[:8]:
+        results.append(
+            verify_claim_semantically(
+                claim,
+                full_text,
+                source_links
+            )
         )
 
-    return verified_results
+    return results

@@ -74,19 +74,26 @@ def calculate_final_trust_score(
     return max(0, min(100, round(score)))
 
 
-def analyze_full_text(text):
+def analyze_full_text(text, source_links=None):
+    if source_links is None:
+        source_links = []
+
     sentences = split_sentences(text)
 
     classified_claims = classify_all_claims(sentences)
 
-    # Updated: the verifier now receives the full text too
     fact_results = verify_factual_claims(
-        classified_claims,
-        text
+        classified_claims=classified_claims,
+        full_text=text,
+        source_links=source_links
     )
 
     bias_result = detect_bias(text)
-    citation_result = score_citations(text)
+
+    citation_result = score_citations(
+        text=text,
+        extra_urls=source_links
+    )
 
     trust_score = calculate_final_trust_score(
         classified_claims,

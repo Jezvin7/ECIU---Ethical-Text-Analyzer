@@ -1,19 +1,24 @@
 import re
 from urllib.parse import urlparse
 
+
 TRUSTED_DOMAINS = [
     "wikipedia.org",
     "who.int",
     "un.org",
+    "unicef.org",
     "europa.eu",
     "gov",
     "edu",
     "nature.com",
     "springer.com",
     "sciencedirect.com",
+    "thelancet.com",
     "reuters.com",
     "bbc.com",
-    "apnews.com"
+    "apnews.com",
+    "cdc.gov",
+    "nih.gov"
 ]
 
 WEAK_DOMAINS = [
@@ -26,63 +31,176 @@ WEAK_DOMAINS = [
     "instagram.com"
 ]
 
+TRUSTED_SOURCE_NAMES = {
+    "world health organization": {
+        "display_name": "World Health Organization (WHO)",
+        "score": 85
+    },
+    "who": {
+        "display_name": "World Health Organization (WHO)",
+        "score": 85
+    },
+    "unicef": {
+        "display_name": "UNICEF",
+        "score": 82
+    },
+    "united nations": {
+        "display_name": "United Nations",
+        "score": 82
+    },
+    "the lancet": {
+        "display_name": "The Lancet",
+        "score": 88
+    },
+    "nature": {
+        "display_name": "Nature",
+        "score": 88
+    },
+    "reuters": {
+        "display_name": "Reuters",
+        "score": 80
+    },
+    "associated press": {
+        "display_name": "Associated Press",
+        "score": 80
+    },
+    "ap news": {
+        "display_name": "AP News",
+        "score": 80
+    },
+    "bbc": {
+        "display_name": "BBC",
+        "score": 75
+    },
+    "our world in data": {
+        "display_name": "Our World in Data",
+        "score": 78
+    }
+}
+
+
 def extract_urls(text):
-    pattern = r'https?://[^\s]+|www\.[^\s]+|\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'
+    pattern = (
+        r'https?://[^\s)>\]]+'
+        r'|www\.[^\s)>\]]+'
+        r'|\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'
+    )
+
     return re.findall(pattern, text)
 
 
-def get_domain(url):
+def normalize_url(url):
     if not url.startswith("http"):
-        url = "https://" + url
+        return "https://" + url
 
-    parsed = urlparse(url)
-    return parsed.netloc.replace("www.", "")
+    return url
 
 
-def score_single_source(url):
-    domain = get_domain(url)
-    lower_domain = domain.lower()
+def get_domain(url):
+    normalized = normalize_url(url)
+    parsed = urlparse(normalized)
+    return parsed.netloc.replace("www.", "").lower()
 
-    if any(trusted in lower_domain for trusted in TRUSTED_DOMAINS):
+
+def score_single_url(url):
+    normalized_url = normalize_url(url)
+    domain = get_domain(normalized_url)
+
+    if any(trusted in domain for trusted in TRUSTED_DOMAINS):
         return {
-            "url": url,
+            "type": "url",
+            "url": normalized_url,
             "domain": domain,
-            "quality": "trusted",
+            "quality": "trusted URL source",
             "score": 90
         }
 
-    if any(weak in lower_domain for weak in WEAK_DOMAINS):
+    if any(weak in domain for weak in WEAK_DOMAINS):
         return {
-            "url": url,
+            "type": "url",
+            "url": normalized_url,
             "domain": domain,
-            "quality": "weak",
+            "quality": "weak URL source",
             "score": 25
         }
 
     return {
-        "url": url,
+        "type": "url",
+        "url": normalized_url,
         "domain": domain,
-        "quality": "unknown",
+        "quality": "unknown URL source",
         "score": 50
     }
 
 
-def score_citations(text):
-    urls = extract_urls(text)
+def extract_named_sources(text):
+    lower_text = text.lower()
+    found = []
 
-    if not urls:
+    for alias, metadata in TRUSTED_SOURCE_NAMES.items():
+        pattern = rf"\b{re.escape(alias)}\b"
+
+        if re.search(pattern, lower_text):
+            found.append({
+                "type": "named_source",
+                "url": metadata["display_name"],
+                "domain": None,
+                "quality": "trusted named source detected",
+                "score": metadata["score"]
+            })
+
+    return found
+
+
+def deduplicate_sources(sources):
+    unique = []
+    seen = set()
+
+    for source in sources:
+        key = (
+            source.get("type"),
+            source.get("url"),
+            source.get("domain")
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(source)
+
+    return unique
+
+
+def score_citations(text, extra_urls=None):
+    if extra_urls is None:
+        extra_urls = []
+
+    visible_urls = extract_urls(text)
+
+    all_urls = list(dict.fromkeys(
+        visible_urls + extra_urls
+    ))
+
+    url_sources = [
+        score_single_url(url)
+        for url in all_urls
+    ]
+
+    named_sources = extract_named_sources(text)
+
+    all_sources = deduplicate_sources(
+        url_sources + named_sources
+    )
+
+    if not all_sources:
         return {
             "overall_score": 0,
             "level": "No citations found",
             "sources": []
         }
 
-    source_scores = [
-        score_single_source(url)
-        for url in urls
-    ]
-
-    average_score = sum(item["score"] for item in source_scores) / len(source_scores)
+    average_score = sum(
+        source["score"] for source in all_sources
+    ) / len(all_sources)
 
     if average_score >= 75:
         level = "High source quality"
@@ -94,5 +212,5 @@ def score_citations(text):
     return {
         "overall_score": round(average_score, 2),
         "level": level,
-        "sources": source_scores
+        "sources": all_sources
     }

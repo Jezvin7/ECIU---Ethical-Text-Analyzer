@@ -1,5 +1,5 @@
-let lastAnalyzedText = "";
-let latestCandidateText = "";
+let lastAnalyzedSignature = "";
+let latestCandidateSignature = "";
 let stableTimer = null;
 let isAnalyzing = false;
 
@@ -14,7 +14,7 @@ const STABILITY_WAIT_MS = 4500;
 
 
 /* =========================================================
-   1. Track user prompt submission
+   1. Track when the user submits a prompt
 ========================================================= */
 
 document.addEventListener("input", (event) => {
@@ -77,14 +77,14 @@ function markPromptSubmitted() {
 
   promptWasSubmitted = true;
   recentGeneratedCandidates = [];
-  latestCandidateText = "";
+  latestCandidateSignature = "";
 
   clearTimeout(stableTimer);
 }
 
 
 /* =========================================================
-   2. General helpers
+   2. Text cleaning
 ========================================================= */
 
 function cleanText(text) {
@@ -97,6 +97,7 @@ function cleanText(text) {
     .replace(/\s+/g, " ")
     .replace(/^Gemini said\s*/i, "")
     .replace(/^Claude said\s*/i, "")
+    .replace(/^ChatGPT said\s*/i, "")
     .trim();
 }
 
@@ -134,7 +135,7 @@ function isNoiseText(text) {
 }
 
 
-function isValidCandidate(text) {
+function isValidCandidateText(text) {
   const cleaned = cleanText(text);
 
   if (!cleaned) {
@@ -162,7 +163,125 @@ function isValidCandidate(text) {
 
 
 /* =========================================================
-   3. ChatGPT extraction
+   3. Extract real URLs hidden behind clickable source labels
+========================================================= */
+
+function normalizeExternalSourceUrl(rawHref) {
+  if (!rawHref) {
+    return null;
+  }
+
+  try {
+    const url = new URL(rawHref, window.location.href);
+
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return null;
+    }
+
+    const currentHost = window.location.hostname;
+    const host = url.hostname.toLowerCase();
+
+    // Ignore links back to the LLM itself
+    const internalHosts = [
+      "chatgpt.com",
+      "chat.openai.com",
+      "gemini.google.com",
+      "claude.ai"
+    ];
+
+    if (
+      host === currentHost ||
+      internalHosts.some(internal => host.includes(internal))
+    ) {
+      return null;
+    }
+
+    // Decode Google redirect links when possible
+    if (
+      host === "www.google.com" ||
+      host === "google.com"
+    ) {
+      const redirected =
+        url.searchParams.get("url") ||
+        url.searchParams.get("q");
+
+      if (redirected) {
+        return normalizeExternalSourceUrl(redirected);
+      }
+    }
+
+    // Ignore obvious non-source utility links
+    const lowerHref = url.href.toLowerCase();
+
+    const unwantedPatterns = [
+      "privacy",
+      "terms",
+      "support.google",
+      "policies.google",
+      "accounts.google"
+    ];
+
+    if (unwantedPatterns.some(pattern => lowerHref.includes(pattern))) {
+      return null;
+    }
+
+    return url.href;
+
+  } catch (error) {
+    return null;
+  }
+}
+
+
+function extractSourceLinksFromElement(element) {
+  if (!element) {
+    return [];
+  }
+
+  const anchors = Array.from(element.querySelectorAll("a[href]"));
+
+  const links = anchors
+    .map(anchor => normalizeExternalSourceUrl(anchor.href))
+    .filter(Boolean);
+
+  return [...new Set(links)];
+}
+
+
+/* =========================================================
+   4. Build a clean response bundle: text + hidden URLs
+========================================================= */
+
+function buildResponseBundle(element) {
+  if (!element) {
+    return null;
+  }
+
+  const text = cleanText(element.innerText);
+  const sourceLinks = extractSourceLinksFromElement(element);
+
+  if (!isValidCandidateText(text)) {
+    return null;
+  }
+
+  return {
+    text,
+    source_links: sourceLinks
+  };
+}
+
+
+function bundleSignature(bundle) {
+  if (!bundle) {
+    return "";
+  }
+
+  return `${bundle.text}|||${bundle.source_links.join("|||")}`;
+}
+
+
+/* =========================================================
+   5. ChatGPT extraction
 ========================================================= */
 
 function extractLatestChatGPTAnswer() {
@@ -175,14 +294,12 @@ function extractLatestChatGPTAnswer() {
   }
 
   const latest = assistantMessages[assistantMessages.length - 1];
-  const text = cleanText(latest.innerText);
-
-  return isValidCandidate(text) ? text : null;
+  return buildResponseBundle(latest);
 }
 
 
 /* =========================================================
-   4. Gemini extraction
+   6. Gemini extraction
 ========================================================= */
 
 function extractLatestGeminiAnswer() {
@@ -196,30 +313,29 @@ function extractLatestGeminiAnswer() {
     '[class*="response-content"]'
   ];
 
-  const candidates = [];
+  const bundles = [];
 
   selectors.forEach(selector => {
     document.querySelectorAll(selector).forEach(element => {
-      const text = cleanText(element.innerText);
+      const bundle = buildResponseBundle(element);
 
-      if (isValidCandidate(text)) {
-        candidates.push(text);
+      if (bundle) {
+        bundles.push(bundle);
       }
     });
   });
 
-  if (!candidates.length) {
+  if (!bundles.length) {
     return getBestRecentGeneratedCandidate();
   }
 
-  candidates.sort((a, b) => b.length - a.length);
-
-  return candidates[0];
+  // Prefer the latest valid candidate in DOM order
+  return bundles[bundles.length - 1];
 }
 
 
 /* =========================================================
-   5. Claude extraction
+   7. Claude extraction
 ========================================================= */
 
 function extractLatestClaudeAnswer() {
@@ -231,31 +347,28 @@ function extractLatestClaudeAnswer() {
     "article"
   ];
 
-  const candidates = [];
+  const bundles = [];
 
   selectors.forEach(selector => {
     document.querySelectorAll(selector).forEach(element => {
-      const text = cleanText(element.innerText);
+      const bundle = buildResponseBundle(element);
 
-      if (isValidCandidate(text)) {
-        candidates.push(text);
+      if (bundle) {
+        bundles.push(bundle);
       }
     });
   });
 
-  if (!candidates.length) {
+  if (!bundles.length) {
     return getBestRecentGeneratedCandidate();
   }
 
-  candidates.sort((a, b) => b.length - a.length);
-
-  return candidates[0];
+  return bundles[bundles.length - 1];
 }
 
 
 /* =========================================================
-   6. Fallback based on newly generated DOM text
-   Used mainly for Gemini / Claude
+   8. DOM fallback for Gemini / Claude
 ========================================================= */
 
 function collectCandidateFromNode(node) {
@@ -267,13 +380,13 @@ function collectCandidateFromNode(node) {
     return;
   }
 
-  const text = cleanText(node.innerText);
+  const bundle = buildResponseBundle(node);
 
-  if (!isValidCandidate(text)) {
+  if (!bundle) {
     return;
   }
 
-  recentGeneratedCandidates.push(text);
+  recentGeneratedCandidates.push(bundle);
 
   if (recentGeneratedCandidates.length > 80) {
     recentGeneratedCandidates.shift();
@@ -282,20 +395,22 @@ function collectCandidateFromNode(node) {
 
 
 function getBestRecentGeneratedCandidate() {
-  const validCandidates = recentGeneratedCandidates.filter(isValidCandidate);
+  const valid = recentGeneratedCandidates.filter(bundle =>
+    bundle && isValidCandidateText(bundle.text)
+  );
 
-  if (!validCandidates.length) {
+  if (!valid.length) {
     return null;
   }
 
-  validCandidates.sort((a, b) => b.length - a.length);
+  valid.sort((a, b) => b.text.length - a.text.length);
 
-  return validCandidates[0];
+  return valid[0];
 }
 
 
 /* =========================================================
-   7. Decide which LLM page we are on
+   9. Platform router
 ========================================================= */
 
 function extractLatestLLMAnswer() {
@@ -321,7 +436,7 @@ function extractLatestLLMAnswer() {
 
 
 /* =========================================================
-   8. Floating popup helpers
+   10. Floating popup helpers
 ========================================================= */
 
 function removeOldPopup() {
@@ -391,10 +506,6 @@ function injectSpinnerStyle() {
 }
 
 
-/* =========================================================
-   9. Loading popup
-========================================================= */
-
 function createLoadingPopup() {
   removeOldPopup();
   injectSpinnerStyle();
@@ -431,10 +542,6 @@ function createLoadingPopup() {
   document.body.appendChild(popup);
 }
 
-
-/* =========================================================
-   10. Final score popup
-========================================================= */
 
 function createScorePopup(data) {
   removeOldPopup();
@@ -534,6 +641,8 @@ function createScorePopup(data) {
       `http://localhost:8501/?analysis_id=${data.analysis_id}`;
 
     window.open(detailsUrl, "_blank");
+
+    popup.remove();
   });
 
   document.getElementById("ethical-close-btn").addEventListener("click", () => {
@@ -541,10 +650,6 @@ function createScorePopup(data) {
   });
 }
 
-
-/* =========================================================
-   11. Error popup
-========================================================= */
 
 function createErrorPopup() {
   removeOldPopup();
@@ -612,21 +717,21 @@ function createErrorPopup() {
 
 
 /* =========================================================
-   12. Send final answer to backend
+   11. Send bundle to backend
 ========================================================= */
 
-function analyzeDetectedText(text) {
+function analyzeDetectedBundle(bundle) {
   if (!promptWasSubmitted) {
     return;
   }
 
-  const cleanedText = cleanText(text);
-
-  if (!isValidCandidate(cleanedText)) {
+  if (!bundle || !isValidCandidateText(bundle.text)) {
     return;
   }
 
-  if (cleanedText === lastAnalyzedText) {
+  const signature = bundleSignature(bundle);
+
+  if (signature === lastAnalyzedSignature) {
     return;
   }
 
@@ -634,7 +739,7 @@ function analyzeDetectedText(text) {
     return;
   }
 
-  lastAnalyzedText = cleanedText;
+  lastAnalyzedSignature = signature;
   isAnalyzing = true;
 
   createLoadingPopup();
@@ -643,7 +748,8 @@ function analyzeDetectedText(text) {
     chrome.runtime.sendMessage(
       {
         type: "ANALYZE_TEXT",
-        text: cleanedText
+        text: bundle.text,
+        source_links: bundle.source_links
       },
       response => {
         isAnalyzing = false;
@@ -663,9 +769,6 @@ function analyzeDetectedText(text) {
         }
 
         createScorePopup(response.data);
-
-        // Analysis for this prompt is complete.
-        // Do not analyze further page changes until a new prompt is submitted.
         promptWasSubmitted = false;
       }
     );
@@ -681,7 +784,7 @@ function analyzeDetectedText(text) {
 
 
 /* =========================================================
-   13. Wait until answer text becomes stable
+   12. Wait until output stabilizes
 ========================================================= */
 
 function scheduleStableAnswerCheck() {
@@ -689,26 +792,33 @@ function scheduleStableAnswerCheck() {
     return;
   }
 
-  const currentAnswer = extractLatestLLMAnswer();
+  const currentBundle = extractLatestLLMAnswer();
 
-  if (!currentAnswer) {
+  if (!currentBundle) {
     return;
   }
 
-  if (currentAnswer !== latestCandidateText) {
-    latestCandidateText = currentAnswer;
+  const currentSignature = bundleSignature(currentBundle);
+
+  if (currentSignature !== latestCandidateSignature) {
+    latestCandidateSignature = currentSignature;
 
     clearTimeout(stableTimer);
 
     stableTimer = setTimeout(() => {
-      const finalAnswer = extractLatestLLMAnswer();
+      const finalBundle = extractLatestLLMAnswer();
+
+      if (!finalBundle) {
+        return;
+      }
+
+      const finalSignature = bundleSignature(finalBundle);
 
       if (
         promptWasSubmitted &&
-        finalAnswer &&
-        finalAnswer === latestCandidateText
+        finalSignature === latestCandidateSignature
       ) {
-        analyzeDetectedText(finalAnswer);
+        analyzeDetectedBundle(finalBundle);
       }
     }, STABILITY_WAIT_MS);
   }
@@ -716,7 +826,7 @@ function scheduleStableAnswerCheck() {
 
 
 /* =========================================================
-   14. Observe page changes
+   13. Observe page mutations
 ========================================================= */
 
 const observer = new MutationObserver((mutations) => {
