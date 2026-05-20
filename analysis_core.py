@@ -1,0 +1,120 @@
+import re
+
+from claim_classifier import classify_all_claims
+from fact_verification import verify_factual_claims
+from bias_classifier import detect_bias
+from citation_quality import score_citations
+from explainability import generate_ai_explanation
+
+
+def split_sentences(text):
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+    return [sentence.strip() for sentence in sentences if sentence.strip()]
+
+
+def calculate_final_trust_score(
+    classified_claims,
+    fact_results,
+    bias_result,
+    citation_result
+):
+    score = 100
+
+    # ---------------------------------------------------
+    # 1. Fact verification penalties
+    # ---------------------------------------------------
+    for item in fact_results:
+        status = item.get("status", "")
+
+        if status == "Likely supported":
+            score -= 0
+
+        elif status == "Partially related / needs review":
+            score -= 6
+
+        elif status == "Not clearly supported":
+            score -= 12
+
+        elif status == "No reference source found":
+            score -= 4
+
+        else:
+            score -= 6
+
+    # ---------------------------------------------------
+    # 2. Bias / emotional language penalty
+    # ---------------------------------------------------
+    score -= bias_result["bias_risk_score"] * 0.25
+
+    # ---------------------------------------------------
+    # 3. Citation quality adjustment
+    # ---------------------------------------------------
+    citation_score = citation_result["overall_score"]
+
+    if citation_score == 0:
+        score -= 20
+
+    elif citation_score < 45:
+        score -= 10
+
+    elif citation_score >= 75:
+        score += 5
+
+    # ---------------------------------------------------
+    # 4. If factual claims exist but no verification ran
+    # ---------------------------------------------------
+    factual_claims = [
+        item for item in classified_claims
+        if item["label"] == "factual claim"
+    ]
+
+    if len(factual_claims) > 0 and len(fact_results) == 0:
+        score -= 10
+
+    return max(0, min(100, round(score)))
+
+
+def analyze_full_text(text, source_links=None):
+    if source_links is None:
+        source_links = []
+
+    sentences = split_sentences(text)
+
+    classified_claims = classify_all_claims(sentences)
+
+    fact_results = verify_factual_claims(
+        classified_claims=classified_claims,
+        full_text=text,
+        source_links=source_links
+    )
+
+    bias_result = detect_bias(text)
+
+    citation_result = score_citations(
+        text=text,
+        extra_urls=source_links
+    )
+
+    trust_score = calculate_final_trust_score(
+        classified_claims,
+        fact_results,
+        bias_result,
+        citation_result
+    )
+
+    ai_explanation = generate_ai_explanation(
+        trust_score,
+        classified_claims,
+        fact_results,
+        bias_result,
+        citation_result
+    )
+
+    return {
+        "classified_claims": classified_claims,
+        "fact_results": fact_results,
+        "bias_result": bias_result,
+        "citation_result": citation_result,
+        "trust_score": trust_score,
+        "ai_explanation": ai_explanation
+    }
