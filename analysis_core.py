@@ -73,6 +73,71 @@ def calculate_final_trust_score(
 
     return max(0, min(100, round(score)))
 
+def build_dashboard_cards(
+    classified_claims,
+    fact_results,
+    bias_result,
+    citation_result
+):
+    factual_claims = [
+        item for item in classified_claims
+        if item.get("label") == "factual claim"
+    ]
+
+    review_claims = [
+        item for item in fact_results
+        if item.get("status") != "Likely supported"
+    ]
+
+    bias_score = bias_result.get("bias_risk_score", 0)
+    citation_score = citation_result.get("overall_score", 0)
+
+    if bias_score >= 70:
+        bias_status = "High Risk"
+    elif bias_score >= 40:
+        bias_status = "Medium Risk"
+    else:
+        bias_status = "Low Risk"
+
+    if citation_score >= 75:
+        citation_status = "Strong Sources"
+    elif citation_score >= 45:
+        citation_status = "Moderate Sources"
+    elif citation_score > 0:
+        citation_status = "Weak Sources"
+    else:
+        citation_status = "No Sources Found"
+
+    return [
+        {
+            "key": "claims",
+            "title": "Claim Classification",
+            "value": len(classified_claims),
+            "status": f"{len(factual_claims)} factual claims",
+            "description": "Classifies sentences as factual claims, opinions, or other text."
+        },
+        {
+            "key": "facts",
+            "title": "Fact Verification",
+            "value": len(fact_results),
+            "status": f"{len(review_claims)} need review",
+            "description": "Checks factual claims against available evidence and semantic similarity."
+        },
+        {
+            "key": "bias",
+            "title": "Bias / Emotion",
+            "value": f"{bias_score}/100",
+            "status": bias_status,
+            "description": "Detects emotional tone, biased wording, and manipulation signals."
+        },
+        {
+            "key": "citations",
+            "title": "Citation Quality",
+            "value": f"{citation_score}/100",
+            "status": citation_status,
+            "description": "Evaluates whether the text provides reliable and clear sources."
+        }
+    ]
 
 def analyze_full_text(text, source_links=None):
     if source_links is None:
@@ -109,12 +174,18 @@ def analyze_full_text(text, source_links=None):
         bias_result,
         citation_result
     )
-
+    dashboard_cards = build_dashboard_cards(
+    classified_claims,
+    fact_results,
+    bias_result,
+    citation_result
+    )
     return {
-        "classified_claims": classified_claims,
-        "fact_results": fact_results,
-        "bias_result": bias_result,
-        "citation_result": citation_result,
-        "trust_score": trust_score,
-        "ai_explanation": ai_explanation
+    "classified_claims": classified_claims,
+    "fact_results": fact_results,
+    "bias_result": bias_result,
+    "citation_result": citation_result,
+    "trust_score": trust_score,
+    "ai_explanation": ai_explanation,
+    "dashboard_cards": dashboard_cards
     }

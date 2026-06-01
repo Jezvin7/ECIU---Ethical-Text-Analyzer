@@ -10,7 +10,7 @@ let promptWasSubmitted = false;
 let recentGeneratedCandidates = [];
 
 const MIN_TEXT_LENGTH = 80;
-const STABILITY_WAIT_MS = 4500;
+const STABILITY_WAIT_MS = 6000;
 
 
 /* =========================================================
@@ -755,7 +755,7 @@ function analyzeDetectedBundle(bundle) {
         isAnalyzing = false;
 
         if (chrome.runtime.lastError) {
-          console.warn(
+          console.error(
             "Ethical Analyser message error:",
             chrome.runtime.lastError.message
           );
@@ -774,19 +774,35 @@ function analyzeDetectedBundle(bundle) {
     );
   } catch (error) {
     isAnalyzing = false;
-
-    console.warn(
+    console.error(
       "Extension context invalidated. Refresh this LLM page after reloading the extension.",
       error
     );
   }
 }
 
+function isLLMStillGenerating() {
+  const buttons = Array.from(document.querySelectorAll("button"));
+
+  return buttons.some(button => {
+    const label = (
+      button.getAttribute("aria-label") ||
+      button.getAttribute("title") ||
+      button.innerText ||
+      ""
+    ).toLowerCase();
+
+    return (
+      label.includes("stop generating") ||
+      label.includes("stop streaming") ||
+      label.includes("stop response")
+    );
+  });
+}
 
 /* =========================================================
    12. Wait until output stabilizes
 ========================================================= */
-
 function scheduleStableAnswerCheck() {
   if (!promptWasSubmitted) {
     return;
@@ -806,6 +822,11 @@ function scheduleStableAnswerCheck() {
     clearTimeout(stableTimer);
 
     stableTimer = setTimeout(() => {
+      if (isLLMStillGenerating()) {
+        scheduleStableAnswerCheck();
+        return;
+      }
+
       const finalBundle = extractLatestLLMAnswer();
 
       if (!finalBundle) {
@@ -823,7 +844,6 @@ function scheduleStableAnswerCheck() {
     }, STABILITY_WAIT_MS);
   }
 }
-
 
 /* =========================================================
    13. Observe page mutations
