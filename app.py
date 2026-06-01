@@ -64,15 +64,18 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stAppViewContainer"] > .main {
     padding-top: 0 !important;
 }
-
+            
 .main .block-container,
 section.main .block-container,
 div.block-container {
-    padding-top: 0.55rem !important;
-    padding-bottom: 1.4rem !important;
-    max-width: 1420px !important;
+    padding-top: 0.6rem !important;
+    padding-bottom: 1rem !important;
+    padding-left: 0.6rem !important;
+    padding-right: 0.6rem !important;
+    max-width: calc(100vw - 64px) !important;
+    width: calc(100vw - 64px) !important;
 }
-
+            
 /* Reduce Streamlit's default vertical gaps */
 div[data-testid="stVerticalBlock"] {
     gap: 0.72rem !important;
