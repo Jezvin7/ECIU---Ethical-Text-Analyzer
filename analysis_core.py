@@ -8,8 +8,22 @@ from explainability import generate_ai_explanation
 
 
 def split_sentences(text):
-    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-    return [sentence.strip() for sentence in sentences if sentence.strip()]
+    text = re.sub(
+        r'(?m)^\s*(?:[-*•]|\d+[.)])\s+',
+        '',
+        text
+    )
+
+    sentences = re.split(
+        r'(?<=[.!?])\s+|\n+',
+        text
+    )
+
+    return [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip()
+    ]
 
 
 def calculate_final_trust_score(
@@ -26,13 +40,13 @@ def calculate_final_trust_score(
     for item in fact_results:
         status = item.get("status", "")
 
-        if status == "Likely supported":
+        if status == "Strong semantic match":
             score -= 0
 
-        elif status == "Partially related / needs review":
+        elif status == "Partial semantic match / needs review":
             score -= 6
 
-        elif status == "Not clearly supported":
+        elif status == "Weak semantic match":
             score -= 12
 
         elif status == "No reference source found":
@@ -51,27 +65,29 @@ def calculate_final_trust_score(
     # ---------------------------------------------------
     citation_score = citation_result["overall_score"]
 
-    if citation_score == 0:
-        score -= 20
-
-    elif citation_score < 45:
-        score -= 10
-
-    elif citation_score >= 75:
-        score += 5
-
-    # ---------------------------------------------------
-    # 4. If factual claims exist but no verification ran
-    # ---------------------------------------------------
     factual_claims = [
         item for item in classified_claims
         if item["label"] == "factual claim"
     ]
 
+    if factual_claims:
+        if citation_score == 0:
+            score -= 20
+
+        elif citation_score < 45:
+            score -= 10
+
+        elif citation_score >= 75:
+            score += 5
+
+    # ---------------------------------------------------
+    # 4. If factual claims exist but no verification ran
+    # ---------------------------------------------------
     if len(factual_claims) > 0 and len(fact_results) == 0:
         score -= 10
 
     return max(0, min(100, round(score)))
+
 
 def build_dashboard_cards(
     classified_claims,
@@ -86,7 +102,7 @@ def build_dashboard_cards(
 
     review_claims = [
         item for item in fact_results
-        if item.get("status") != "Likely supported"
+        if item.get("status") != "Strong semantic match"
     ]
 
     bias_score = bias_result.get("bias_risk_score", 0)
@@ -139,13 +155,16 @@ def build_dashboard_cards(
         }
     ]
 
+
 def analyze_full_text(text, source_links=None):
     if source_links is None:
         source_links = []
 
     sentences = split_sentences(text)
 
-    classified_claims = classify_all_claims(sentences)
+    classified_claims = classify_all_claims(
+        sentences
+    )
 
     fact_results = verify_factual_claims(
         classified_claims=classified_claims,
@@ -174,18 +193,20 @@ def analyze_full_text(text, source_links=None):
         bias_result,
         citation_result
     )
+
     dashboard_cards = build_dashboard_cards(
-    classified_claims,
-    fact_results,
-    bias_result,
-    citation_result
+        classified_claims,
+        fact_results,
+        bias_result,
+        citation_result
     )
+
     return {
-    "classified_claims": classified_claims,
-    "fact_results": fact_results,
-    "bias_result": bias_result,
-    "citation_result": citation_result,
-    "trust_score": trust_score,
-    "ai_explanation": ai_explanation,
-    "dashboard_cards": dashboard_cards
+        "classified_claims": classified_claims,
+        "fact_results": fact_results,
+        "bias_result": bias_result,
+        "citation_result": citation_result,
+        "trust_score": trust_score,
+        "ai_explanation": ai_explanation,
+        "dashboard_cards": dashboard_cards
     }

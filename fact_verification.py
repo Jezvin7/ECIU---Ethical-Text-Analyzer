@@ -22,9 +22,16 @@ TRUSTED_DOMAINS = [
     "bbc.com",
     "apnews.com",
     "cdc.gov",
-    "nih.gov",
-    "gov",
-    "edu"
+    "nih.gov"
+]
+
+
+TRUSTED_SUFFIXES = [
+    ".gov",
+    ".edu",
+    ".gov.uk",
+    ".ac.uk",
+    ".edu.au"
 ]
 
 
@@ -48,15 +55,20 @@ def normalize_url(url):
 def get_domain(url):
     normalized = normalize_url(url)
     parsed = urlparse(normalized)
+
     return parsed.netloc.replace("www.", "").lower()
 
 
 def is_trusted_domain(domain):
-    return any(
-        domain == trusted
-        or domain.endswith("." + trusted)
-        or trusted in domain
+    if any(
+        domain == trusted or domain.endswith("." + trusted)
         for trusted in TRUSTED_DOMAINS
+    ):
+        return True
+
+    return any(
+        domain.endswith(suffix)
+        for suffix in TRUSTED_SUFFIXES
     )
 
 
@@ -273,7 +285,10 @@ def best_semantic_match(claim, evidence_items):
         convert_to_tensor=True
     )
 
-    chunk_texts = [item["chunk"] for item in chunks]
+    chunk_texts = [
+        item["chunk"]
+        for item in chunks
+    ]
 
     chunk_embeddings = embedding_model.encode(
         chunk_texts,
@@ -299,13 +314,13 @@ def best_semantic_match(claim, evidence_items):
 
 
 def similarity_to_status(similarity):
-    if similarity >= 0.66:
-        return "Likely supported"
+    if similarity >= 0.70:
+        return "Strong semantic match"
 
-    if similarity >= 0.45:
-        return "Partially related / needs review"
+    if similarity >= 0.50:
+        return "Partial semantic match / needs review"
 
-    return "Not clearly supported"
+    return "Weak semantic match"
 
 
 def should_skip_claim_for_verification(claim):
@@ -319,7 +334,8 @@ def should_skip_claim_for_verification(claim):
         "this is for informational purposes only",
         "for medical advice or diagnosis, consult a professional",
         "gemini said",
-        "claude said"
+        "claude said",
+        "chatgpt said"
     ]
 
     if any(pattern in lower for pattern in skip_patterns):
@@ -331,39 +347,40 @@ def should_skip_claim_for_verification(claim):
     return False
 
 
-def verify_claim_semantically(claim, full_text, source_links):
-    direct_evidence = collect_direct_trusted_url_evidence(
-        full_text,
-        source_links
-    )
+def format_match_result(claim, match):
+    return {
+        "claim": claim,
+        "status": similarity_to_status(match["similarity"]),
+        "similarity": match["similarity"],
+        "source": match["source"],
+        "summary": match["summary"],
+        "evidence_type": match["evidence_type"]
+    }
 
+
+def verify_claim_semantically(claim, direct_evidence):
     direct_match = best_semantic_match(
         claim,
         direct_evidence
     )
 
-    if direct_match:
-        return {
-            "claim": claim,
-            "status": similarity_to_status(direct_match["similarity"]),
-            "similarity": direct_match["similarity"],
-            "source": direct_match["source"],
-            "summary": direct_match["summary"],
-            "evidence_type": direct_match["evidence_type"]
-        }
+    best_match = direct_match
 
-    wiki_evidence = retrieve_wikipedia_evidence(claim)
-    wiki_match = best_semantic_match(claim, wiki_evidence)
+    if not direct_match or direct_match["similarity"] < 0.50:
+        wiki_evidence = retrieve_wikipedia_evidence(claim)
+        wiki_match = best_semantic_match(claim, wiki_evidence)
 
-    if wiki_match and wiki_match["similarity"] >= 0.30:
-        return {
-            "claim": claim,
-            "status": similarity_to_status(wiki_match["similarity"]),
-            "similarity": wiki_match["similarity"],
-            "source": wiki_match["source"],
-            "summary": wiki_match["summary"],
-            "evidence_type": wiki_match["evidence_type"]
-        }
+        if wiki_match and (
+            not best_match
+            or wiki_match["similarity"] > best_match["similarity"]
+        ):
+            best_match = wiki_match
+
+    if best_match and best_match["similarity"] >= 0.30:
+        return format_match_result(
+            claim,
+            best_match
+        )
 
     return {
         "claim": claim,
@@ -390,14 +407,18 @@ def verify_factual_claims(classified_claims, full_text, source_links=None):
         if not should_skip_claim_for_verification(claim)
     ]
 
+    direct_evidence = collect_direct_trusted_url_evidence(
+        full_text,
+        source_links
+    )
+
     results = []
 
     for claim in filtered_claims[:8]:
         results.append(
             verify_claim_semantically(
                 claim,
-                full_text,
-                source_links
+                direct_evidence
             )
         )
 

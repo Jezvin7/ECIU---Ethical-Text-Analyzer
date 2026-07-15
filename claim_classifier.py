@@ -1,3 +1,4 @@
+import re
 from transformers import pipeline
 
 claim_model = pipeline(
@@ -12,51 +13,45 @@ LABELS = [
 ]
 
 
-FACTUAL_SIGNALS = [
-    "states that",
-    "research published",
-    "data from",
-    "according to",
-    "study",
-    "studies",
-    "report",
-    "reports",
-    "evidence",
-    "prevented",
-    "reducing",
-    "increases",
-    "decreases",
-    "causes",
-    "leads to",
-    "shows",
-    "support",
-    "supports",
-    "has",
-    "have",
-    "is",
-    "are",
-    "was",
-    "were"
+FACTUAL_PATTERNS = [
+    re.compile(r"\baccording\s+to\b", re.IGNORECASE),
+
+    re.compile(
+        r"\b(?:study|studies|research|report|reports|data|evidence)\b"
+        r".{0,80}\b(?:show|shows|showed|find|finds|found|indicate|"
+        r"indicates|reported|demonstrate|demonstrates)\b",
+        re.IGNORECASE
+    ),
+
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:%|percent|million|billion|years?|"
+        r"months?|days?|hours?)\b",
+        re.IGNORECASE
+    ),
+
+    re.compile(r"\b(?:19|20)\d{2}\b"),
+
+    re.compile(
+        r"\b(?:causes?|increases?|decreases?|reduces?|prevents?|"
+        r"leads?\s+to|results?\s+in)\b",
+        re.IGNORECASE
+    )
 ]
 
 
 def classify_claim(sentence):
-    lower = sentence.lower()
-
-    # Strong factual override
-    if any(signal in lower for signal in FACTUAL_SIGNALS):
-        return {
-            "sentence": sentence,
-            "label": "factual claim",
-            "confidence": 0.90
-        }
-
     result = claim_model(sentence, LABELS)
+    scores = dict(zip(result["labels"], result["scores"]))
+
+    label = result["labels"][0]
+
+    if any(pattern.search(sentence) for pattern in FACTUAL_PATTERNS):
+        label = "factual claim"
 
     return {
         "sentence": sentence,
-        "label": result["labels"][0],
-        "confidence": round(result["scores"][0], 3)
+        "label": label,
+        "confidence": round(scores[label], 3)
     }
 
 

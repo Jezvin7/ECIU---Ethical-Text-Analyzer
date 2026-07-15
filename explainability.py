@@ -18,9 +18,9 @@ def generate_ai_explanation(
         if item["label"] == "factual claim"
     ]
 
-    unsupported_claims = [
+    review_claims = [
         item for item in fact_results
-        if item["status"] != "Likely supported"
+        if item["status"] != "Strong semantic match"
     ]
 
     biased_words = bias_result.get("biased_words", [])
@@ -31,18 +31,17 @@ def generate_ai_explanation(
     citation_score = citation_result.get("overall_score", 0)
 
     prompt = f"""
-Write a short explanation.
+Write a short and cautious explanation.
+Do not claim that semantic similarity proves factual truth.
 
 Trust score: {trust_score}/100.
 Factual claims: {len(factual_claims)}.
-Unsupported claims: {len(unsupported_claims)}.
+Claims needing review: {len(review_claims)}.
 Bias emotion: {top_emotion}.
 Bias score: {bias_score}/100.
 Biased words: {biased_words}.
 Citation quality: {citation_level}.
 Citation score: {citation_score}/100.
-
-Explain whether the content should be trusted.
 """
 
     try:
@@ -60,16 +59,18 @@ Explain whether the content should be trusted.
             do_sample=False
         )
 
-        ai_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        ai_text = tokenizer.decode(
+            outputs[0],
+            skip_special_tokens=True
+        )
 
     except Exception:
         ai_text = ""
 
-    # Reliable fallback explanation
     explanation = f"""
 The content received a trust score of {trust_score}/100.
 
-The system detected {len(factual_claims)} factual claim(s), and {len(unsupported_claims)} of them were not clearly supported by the available reference source.
+The system detected {len(factual_claims)} factual claim(s), and {len(review_claims)} of them did not have a strong semantic match with the available reference source. Semantic similarity shows how closely the texts are related, but it does not independently prove that a claim is true.
 
 The AI bias detector identified the dominant emotional tone as "{top_emotion}" with a bias risk score of {bias_score}/100.
 """

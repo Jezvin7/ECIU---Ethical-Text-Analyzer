@@ -2,15 +2,23 @@ let lastAnalyzedSignature = "";
 let latestCandidateSignature = "";
 let stableTimer = null;
 let isAnalyzing = false;
+let currentSubmissionId = 0;
+let submissionBaselineSignature = "";
+let pendingAnalyses = [];
+let queuedSignatures = new Set();
+let detectionPollTimer = null;
+let lastSubmissionText = "";
+let lastSubmissionTime = 0;
 
 let latestTypedText = "";
 let lastSubmittedUserText = "";
 let promptWasSubmitted = false;
 
 let recentGeneratedCandidates = [];
+let currentSubmissionSourceLinks = new Set();
 
-const MIN_TEXT_LENGTH = 80;
-const STABILITY_WAIT_MS = 6000;
+const MIN_TEXT_LENGTH = 40;
+const STABILITY_WAIT_MS = 7000;
 
 
 /* =========================================================
@@ -18,32 +26,36 @@ const STABILITY_WAIT_MS = 6000;
 ========================================================= */
 
 document.addEventListener("input", (event) => {
-  const target = event.target;
+  const input = getTextInput(event.target);
 
-  const isTextInput =
-    target.tagName === "TEXTAREA" ||
-    target.getAttribute("contenteditable") === "true";
-
-  if (isTextInput) {
-    latestTypedText = target.innerText || target.value || "";
+  if (!input) {
+    return;
   }
+
+  latestTypedText = input.innerText || input.value || "";
 }, true);
 
 
 document.addEventListener("keydown", (event) => {
-  const target = event.target;
+  const input = getTextInput(event.target);
 
-  const isTextInput =
-    target.tagName === "TEXTAREA" ||
-    target.getAttribute("contenteditable") === "true";
-
-  if (isTextInput && event.key === "Enter" && !event.shiftKey) {
+  if (
+    input &&
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.isComposing
+  ) {
+    latestTypedText = input.innerText || input.value || latestTypedText;
     markPromptSubmitted();
   }
 }, true);
 
 
 document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
   const button = event.target.closest("button");
 
   if (!button) {
@@ -52,34 +64,108 @@ document.addEventListener("click", (event) => {
 
   const ariaLabel = button.getAttribute("aria-label")?.toLowerCase() || "";
   const title = button.getAttribute("title")?.toLowerCase() || "";
-  const text = button.innerText?.toLowerCase() || "";
+  const text = button.innerText?.toLowerCase().trim() || "";
 
   const looksLikeSendButton =
+    button.matches('[data-testid="send-button"]') ||
     ariaLabel.includes("send") ||
     ariaLabel.includes("submit") ||
-    ariaLabel.includes("send prompt") ||
     title.includes("send") ||
     title.includes("submit") ||
-    text.includes("send");
+    text === "send";
 
   if (looksLikeSendButton) {
+    const input = findActiveTextInput();
+
+    if (input) {
+      latestTypedText = input.innerText || input.value || latestTypedText;
+    }
+
     markPromptSubmitted();
   }
 }, true);
 
 
+function getTextInput(target) {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+
+  return target.closest(
+    'textarea, [contenteditable="true"], #prompt-textarea'
+  );
+}
+
+
+function findActiveTextInput() {
+  const inputs = Array.from(document.querySelectorAll(
+    '#prompt-textarea, textarea, [contenteditable="true"]'
+  ));
+
+  return inputs.find(input => input.offsetParent !== null) || inputs[0] || null;
+}
+
+
 function markPromptSubmitted() {
   const typed = cleanText(latestTypedText);
 
-  if (typed) {
-    lastSubmittedUserText = typed;
+  if (!typed) {
+    return;
   }
+
+  const now = Date.now();
+
+  if (
+    typed === lastSubmissionText &&
+    now - lastSubmissionTime < 1000
+  ) {
+    return;
+  }
+
+  lastSubmissionText = typed;
+  lastSubmissionTime = now;
+  lastSubmittedUserText = typed;
+  latestTypedText = "";
+  currentSubmissionId += 1;
+
+  const existingBundle = extractLatestLLMAnswer();
+  submissionBaselineSignature = bundleSignature(existingBundle);
 
   promptWasSubmitted = true;
   recentGeneratedCandidates = [];
+  currentSubmissionSourceLinks = new Set();
   latestCandidateSignature = "";
 
   clearTimeout(stableTimer);
+  startDetectionPolling(currentSubmissionId);
+}
+
+
+function startDetectionPolling(submissionId) {
+  clearInterval(detectionPollTimer);
+
+  detectionPollTimer = setInterval(() => {
+    if (
+      !promptWasSubmitted ||
+      submissionId !== currentSubmissionId
+    ) {
+      clearInterval(detectionPollTimer);
+      detectionPollTimer = null;
+      return;
+    }
+
+    scheduleStableAnswerCheck();
+  }, 1000);
+}
+
+
+function stopDetectionPolling(submissionId) {
+  if (submissionId !== currentSubmissionId) {
+    return;
+  }
+
+  clearInterval(detectionPollTimer);
+  detectionPollTimer = null;
 }
 
 
@@ -115,9 +201,9 @@ function isSameAsUserPrompt(text) {
 
 
 function isNoiseText(text) {
-  const lower = text.toLowerCase();
+  const cleaned = cleanText(text).toLowerCase();
 
-  const noisePatterns = [
+  const exactNoisePatterns = [
     "gemini is ai and can make mistakes",
     "your privacy and gemini",
     "opens in a new window",
@@ -127,11 +213,10 @@ function isNoiseText(text) {
     "check important info",
     "google apps",
     "new chat",
-    "recent",
     "settings and help"
   ];
 
-  return noisePatterns.some(pattern => lower.includes(pattern));
+  return exactNoisePatterns.some(pattern => cleaned === pattern);
 }
 
 
@@ -166,22 +251,137 @@ function isValidCandidateText(text) {
    3. Extract real URLs hidden behind clickable source labels
 ========================================================= */
 
-function normalizeExternalSourceUrl(rawHref) {
-  if (!rawHref) {
+const LINK_ELEMENT_SELECTOR = [
+  "a",
+  "area",
+  '[role="link"]',
+  "[href]",
+  "[cite]",
+  "[data-href]",
+  "[data-url]",
+  "[data-source-url]",
+  "[data-citation-url]",
+  "[data-redirect-url]",
+  "[data-target-url]",
+  "[data-link]",
+  "[data-source]",
+  "[data-citation]"
+].join(", ");
+
+const RESPONSE_OR_CITATION_SELECTOR = [
+  '[data-message-author-role="assistant"]',
+  "model-response",
+  "message-content",
+  ".model-response-text",
+  ".response-container",
+  "response-container",
+  '[data-testid="assistant-message"]',
+  '[data-testid*="assistant"]',
+  '[data-testid*="citation"]',
+  '[data-testid*="source"]',
+  '[class*="citation"]',
+  '[class*="source-link"]',
+  '[class*="source-card"]',
+  '[aria-label*="citation" i]',
+  '[aria-label*="source" i]',
+  '[role="dialog"]',
+  '[role="tooltip"]'
+].join(", ");
+
+const REDIRECT_PARAMETER_NAMES = [
+  "url",
+  "q",
+  "target",
+  "redirect",
+  "redirect_url",
+  "destination",
+  "dest",
+  "href",
+  "u",
+  "continue",
+  "next"
+];
+
+const URL_VALUE_PATTERN = /(?:https?:\/\/|\/\/|www\.)[^\s<>"'\\]+|(?<!@)\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<>"'\\]*)?/gi;
+
+
+function decodeUrlValue(value) {
+  let decoded = String(value || "").replace(/\\\//g, "/").replace(/&amp;/gi, "&");
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const nextValue = decodeURIComponent(decoded);
+
+      if (nextValue === decoded) {
+        break;
+      }
+
+      decoded = nextValue;
+    } catch (error) {
+      break;
+    }
+  }
+
+  return decoded;
+}
+
+
+function extractUrlCandidates(value) {
+  if (!value) {
+    return [];
+  }
+
+  const decoded = decodeUrlValue(value);
+  const matches = decoded.match(URL_VALUE_PATTERN) || [];
+  const candidates = [decoded, ...matches];
+
+  return [...new Set(candidates.map(candidate => candidate.trim()).filter(Boolean))];
+}
+
+
+function normalizeExternalSourceUrl(rawHref, depth = 0) {
+  if (!rawHref || depth > 4) {
+    return null;
+  }
+
+  const decodedHref = decodeUrlValue(rawHref)
+    .trim()
+    .replace(/^["'(<\[]+|["')>\],.;!?]+$/g, "");
+
+  if (!decodedHref || /^(javascript|mailto|tel|data|blob):/i.test(decodedHref)) {
     return null;
   }
 
   try {
-    const url = new URL(rawHref, window.location.href);
+    const preparedHref = decodedHref.startsWith("//")
+      ? `${window.location.protocol}${decodedHref}`
+      : decodedHref;
+
+    const url = new URL(preparedHref, window.location.href);
 
     if (!["http:", "https:"].includes(url.protocol)) {
       return null;
     }
 
-    const currentHost = window.location.hostname;
+    for (const parameterName of REDIRECT_PARAMETER_NAMES) {
+      const redirected = url.searchParams.get(parameterName);
+
+      if (!redirected) {
+        continue;
+      }
+
+      for (const candidate of extractUrlCandidates(redirected)) {
+        const normalizedRedirect = normalizeExternalSourceUrl(candidate, depth + 1);
+
+        if (normalizedRedirect) {
+          return normalizedRedirect;
+        }
+      }
+    }
+
+    const currentHost = window.location.hostname.toLowerCase();
     const host = url.hostname.toLowerCase();
 
-    // Ignore links back to the LLM itself
     const internalHosts = [
       "chatgpt.com",
       "chat.openai.com",
@@ -191,60 +391,123 @@ function normalizeExternalSourceUrl(rawHref) {
 
     if (
       host === currentHost ||
-      internalHosts.some(internal => host.includes(internal))
+      internalHosts.some(internal =>
+        host === internal || host.endsWith(`.${internal}`)
+      )
     ) {
       return null;
     }
 
-    // Decode Google redirect links when possible
-    if (
-      host === "www.google.com" ||
-      host === "google.com"
-    ) {
-      const redirected =
-        url.searchParams.get("url") ||
-        url.searchParams.get("q");
-
-      if (redirected) {
-        return normalizeExternalSourceUrl(redirected);
-      }
-    }
-
-    // Ignore obvious non-source utility links
-    const lowerHref = url.href.toLowerCase();
-
-    const unwantedPatterns = [
-      "privacy",
-      "terms",
-      "support.google",
-      "policies.google",
-      "accounts.google"
-    ];
-
-    if (unwantedPatterns.some(pattern => lowerHref.includes(pattern))) {
-      return null;
-    }
-
+    url.hash = "";
     return url.href;
-
   } catch (error) {
     return null;
   }
 }
 
 
+function getLinkAttributeValues(element) {
+  const values = [];
+
+  if (!(element instanceof Element)) {
+    return values;
+  }
+
+  if (typeof element.href === "string" && element.href) {
+    values.push(element.href);
+  }
+
+  Array.from(element.attributes || []).forEach(attribute => {
+    const name = attribute.name.toLowerCase();
+
+    if (
+      name === "href" ||
+      name === "cite" ||
+      name === "aria-label" ||
+      name === "title" ||
+      name.includes("url") ||
+      name.includes("href") ||
+      name.includes("source") ||
+      name.includes("citation") ||
+      name.includes("redirect")
+    ) {
+      values.push(attribute.value);
+    }
+  });
+
+  if (element.matches('a, area, [role="link"]')) {
+    values.push(element.textContent || "");
+  }
+
+  return values;
+}
+
+
 function extractSourceLinksFromElement(element) {
-  if (!element) {
+  if (!(element instanceof Element)) {
     return [];
   }
 
-  const anchors = Array.from(element.querySelectorAll("a[href]"));
+  const linkElements = [
+    element,
+    ...element.querySelectorAll(LINK_ELEMENT_SELECTOR)
+  ];
 
-  const links = anchors
-    .map(anchor => normalizeExternalSourceUrl(anchor.href))
-    .filter(Boolean);
+  const rawValues = [
+    element.innerText || element.textContent || ""
+  ];
+
+  linkElements.forEach(linkElement => {
+    rawValues.push(...getLinkAttributeValues(linkElement));
+  });
+
+  const links = [];
+
+  rawValues.forEach(value => {
+    extractUrlCandidates(value).forEach(candidate => {
+      const normalizedUrl = normalizeExternalSourceUrl(candidate);
+
+      if (normalizedUrl) {
+        links.push(normalizedUrl);
+      }
+    });
+  });
 
   return [...new Set(links)];
+}
+
+
+function mergeSourceLinks(...linkGroups) {
+  const links = linkGroups.flat().filter(Boolean);
+  return [...new Set(links)].sort();
+}
+
+
+function isLikelyResponseOrCitationElement(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(
+    element.matches(RESPONSE_OR_CITATION_SELECTOR) ||
+    element.closest(RESPONSE_OR_CITATION_SELECTOR) ||
+    element.querySelector(RESPONSE_OR_CITATION_SELECTOR)
+  );
+}
+
+
+function collectSourceLinksFromNode(node) {
+  if (!promptWasSubmitted || !(node instanceof Element)) {
+    return;
+  }
+
+  if (!isLikelyResponseOrCitationElement(node)) {
+    return;
+  }
+
+  extractSourceLinksFromElement(node).forEach(link => {
+    currentSubmissionSourceLinks.add(link);
+  });
 }
 
 
@@ -258,7 +521,11 @@ function buildResponseBundle(element) {
   }
 
   const text = cleanText(element.innerText);
-  const sourceLinks = extractSourceLinksFromElement(element);
+
+  const sourceLinks = mergeSourceLinks(
+    extractSourceLinksFromElement(element),
+    [...currentSubmissionSourceLinks]
+  );
 
   if (!isValidCandidateText(text)) {
     return null;
@@ -329,7 +596,6 @@ function extractLatestGeminiAnswer() {
     return getBestRecentGeneratedCandidate();
   }
 
-  // Prefer the latest valid candidate in DOM order
   return bundles[bundles.length - 1];
 }
 
@@ -379,6 +645,8 @@ function collectCandidateFromNode(node) {
   if (!(node instanceof HTMLElement)) {
     return;
   }
+
+  collectSourceLinksFromNode(node);
 
   const bundle = buildResponseBundle(node);
 
@@ -641,7 +909,6 @@ function createScorePopup(data) {
       `http://localhost:8501/?analysis_id=${data.analysis_id}`;
 
     window.open(detailsUrl, "_blank");
-
     popup.remove();
   });
 
@@ -720,66 +987,111 @@ function createErrorPopup() {
    11. Send bundle to backend
 ========================================================= */
 
-function analyzeDetectedBundle(bundle) {
-  if (!promptWasSubmitted) {
-    return;
-  }
-
+function analyzeDetectedBundle(bundle, submissionId = currentSubmissionId) {
   if (!bundle || !isValidCandidateText(bundle.text)) {
     return;
   }
 
   const signature = bundleSignature(bundle);
 
-  if (signature === lastAnalyzedSignature) {
+  if (
+    signature === lastAnalyzedSignature ||
+    queuedSignatures.has(signature)
+  ) {
     return;
+  }
+
+  queuedSignatures.add(signature);
+
+  const analysis = {
+    bundle,
+    submissionId,
+    signature
+  };
+
+  if (submissionId === currentSubmissionId) {
+    promptWasSubmitted = false;
+    stopDetectionPolling(submissionId);
   }
 
   if (isAnalyzing) {
+    pendingAnalyses.push(analysis);
     return;
   }
 
-  lastAnalyzedSignature = signature;
-  isAnalyzing = true;
+  startAnalysis(analysis);
+}
 
+
+function startAnalysis(analysis) {
+  isAnalyzing = true;
   createLoadingPopup();
 
   try {
     chrome.runtime.sendMessage(
       {
         type: "ANALYZE_TEXT",
-        text: bundle.text,
-        source_links: bundle.source_links
+        text: analysis.bundle.text,
+        source_links: analysis.bundle.source_links
       },
       response => {
-        isAnalyzing = false;
-
         if (chrome.runtime.lastError) {
           console.error(
             "Ethical Analyser message error:",
             chrome.runtime.lastError.message
           );
+
+          createErrorPopup();
+          finishAnalysis(analysis, false);
           return;
         }
 
         if (!response || !response.success) {
           console.error("Ethical Analyser backend error.");
           createErrorPopup();
+          finishAnalysis(analysis, false);
           return;
         }
 
+        lastAnalyzedSignature = analysis.signature;
         createScorePopup(response.data);
-        promptWasSubmitted = false;
+        finishAnalysis(analysis, true);
       }
     );
   } catch (error) {
-    isAnalyzing = false;
     console.error(
       "Extension context invalidated. Refresh this LLM page after reloading the extension.",
       error
     );
+
+    createErrorPopup();
+    finishAnalysis(analysis, false);
   }
 }
+
+
+function finishAnalysis(analysis, success) {
+  isAnalyzing = false;
+  queuedSignatures.delete(analysis.signature);
+
+  if (!success && analysis.submissionId === currentSubmissionId) {
+    promptWasSubmitted = false;
+    stopDetectionPolling(analysis.submissionId);
+  }
+
+  processNextPendingAnalysis();
+}
+
+
+function processNextPendingAnalysis() {
+  if (isAnalyzing || !pendingAnalyses.length) {
+    return;
+  }
+
+  const nextAnalysis = pendingAnalyses.shift();
+  startAnalysis(nextAnalysis);
+}
+
 
 function isLLMStillGenerating() {
   const buttons = Array.from(document.querySelectorAll("button"));
@@ -800,10 +1112,12 @@ function isLLMStillGenerating() {
   });
 }
 
+
 /* =========================================================
    12. Wait until output stabilizes
 ========================================================= */
-function scheduleStableAnswerCheck() {
+
+function scheduleStableAnswerCheck(force = false) {
   if (!promptWasSubmitted) {
     return;
   }
@@ -816,14 +1130,30 @@ function scheduleStableAnswerCheck() {
 
   const currentSignature = bundleSignature(currentBundle);
 
-  if (currentSignature !== latestCandidateSignature) {
+  if (currentSignature === submissionBaselineSignature) {
+    return;
+  }
+
+  if (
+    currentSignature !== latestCandidateSignature ||
+    force
+  ) {
     latestCandidateSignature = currentSignature;
 
     clearTimeout(stableTimer);
 
+    const scheduledSubmissionId = currentSubmissionId;
+
     stableTimer = setTimeout(() => {
+      if (
+        !promptWasSubmitted ||
+        scheduledSubmissionId !== currentSubmissionId
+      ) {
+        return;
+      }
+
       if (isLLMStillGenerating()) {
-        scheduleStableAnswerCheck();
+        scheduleStableAnswerCheck(true);
         return;
       }
 
@@ -836,14 +1166,15 @@ function scheduleStableAnswerCheck() {
       const finalSignature = bundleSignature(finalBundle);
 
       if (
-        promptWasSubmitted &&
+        finalSignature !== submissionBaselineSignature &&
         finalSignature === latestCandidateSignature
       ) {
-        analyzeDetectedBundle(finalBundle);
+        analyzeDetectedBundle(finalBundle, scheduledSubmissionId);
       }
     }, STABILITY_WAIT_MS);
   }
 }
+
 
 /* =========================================================
    13. Observe page mutations
@@ -856,10 +1187,12 @@ const observer = new MutationObserver((mutations) => {
 
   mutations.forEach(mutation => {
     mutation.addedNodes.forEach(node => {
+      collectSourceLinksFromNode(node);
       collectCandidateFromNode(node);
     });
 
     if (mutation.target instanceof HTMLElement) {
+      collectSourceLinksFromNode(mutation.target);
       collectCandidateFromNode(mutation.target);
     }
   });
